@@ -1,7 +1,7 @@
 ---
 name: windows-device-driver-triage
 description: Use when a device on Windows is not detected or broken.
-version: 1.1.0
+version: 1.2.0
 author: Hermes Agent
 license: MIT
 metadata:
@@ -190,6 +190,47 @@ Work the ladder in order, cheapest first:
 Only after the device **enumerates** does driver work become meaningful.
 
 > **Related trap:** `Unknown USB Device (Invalid Configuration Descriptor)` means the descriptor was read but is malformed. Usually a genuinely faulty device or a bad hub. Same ladder.
+
+---
+
+### Phase 2c: Audio plays but the microphone does not record
+
+The classic report: "I hear sound in my headset but the mic does not work, and it worked before."
+
+This is almost never a driver fault. It is nearly always **the wrong default input device**. Work the ladder in this order:
+
+1. **What is Windows actually listening to?** Read the default capture endpoint and its mute and gain. A webcam mic left as the default at low gain is the single most common cause.
+2. **Do a real capture test.** A device that reports healthy can still deliver silence. Record from it and measure the level (see Phase 7).
+3. **Check the jack.** A headset with two 3.5mm plugs has separate output (green) and input (pink). Sound working proves nothing about the mic. The pink plug must be in the pink jack, never blue (line-in) and never green.
+4. **Check the inline mute.** Many headsets have a small switch on the cable or a button on the earcup.
+5. **Check jack detection.** If the vendor's audio driver is absent (the codec is on Microsoft's generic `hdaudio.inf`), there is no jack retasking and no plug-in popup, so a combo jack may never register a headset mic.
+
+Enumerate every endpoint and its true state from the registry:
+
+```powershell
+$base = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture'
+Get-ChildItem $base | ForEach-Object {
+  $p     = Get-ItemProperty $_.PSPath
+  $props = Get-ItemProperty (Join-Path $_.PSPath 'Properties')
+  $nm    = ($props.PSObject.Properties | Where-Object { $_.Name -like '*},2' }).Value
+  $st    = switch ($p.DeviceState) { 1 {'ACTIVE'} 2 {'DISABLED'} 4 {'NOTPRESENT'} 8 {'UNPLUGGED'} }
+  '{0,-10} {1}' -f $st, $nm
+}
+```
+
+`UNPLUGGED` on every `Headset` entry, while `Speakers` is the only active output, means Windows sees no headset mic jack in use. That is a physical routing problem and **no driver will fix it**.
+
+Set the default input for **all three roles**, not just Console. Dictation and call apps often follow the Communications role independently, so fixing only Console leaves the bug in place for the app the user actually cares about. The `IPolicyConfig` COM interface (`{870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}`) exposes `SetDefaultEndpoint(deviceId, role)` for roles 0, 1 and 2.
+
+Then set the gain and unmute, and prove it with a real recording:
+
+```powershell
+ffmpeg -f dshow -i audio="Microphone (Device Name)" -t 5 -af volumedetect -f null -
+```
+
+`max_volume` around -20 dB is a live signal. `-91 dB` is digital silence. Also run `ffmpeg -list_devices true -f dshow -i dummy` to see exactly which capture devices actually exist.
+
+**Do not install an audio driver to fix a wrong default device.** Reinstalling drivers for this symptom never fixes it and wastes the user's time.
 
 ---
 
@@ -424,6 +465,10 @@ If the driver is in `DriverStore\FileRepository`, the vendor utility folder is d
 | Device works, then vanishes | USB selective suspend | Disable power management on the root hub |
 | Works on USB 2.0, fails on 3.0 | Signal integrity | Keep it on the 2.0 port |
 | `CM_PROB_DEVICE_NOT_THERE` on PS/2 | No PS/2 hardware present | Normal. Ignore |
+| Sound plays but the mic records nothing | Wrong default input device | Set the correct default for all three roles |
+| Headset mic silent, `Headset` endpoint UNPLUGGED | Pink plug not in the mic jack | Move it to the pink jack, not blue or green |
+| Mic healthy but captures silence | Inline mute switch on the cable | Slide it off |
+| Every `Headset` endpoint UNPLUGGED, only `Speakers` active | Combo jack not detected, or mic plug in an output jack | Use a jack that carries input, or a TRRS splitter |
 
 ---
 
